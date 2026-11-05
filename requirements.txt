@@ -3,3 +3,7 @@ uvicorn
 httpx
 openai
 python-dotenv
+livekit-agents
+livekit-plugins-elevenlabs
+livekit-plugins-google
+livekit-plugins-silero
