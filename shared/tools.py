@@ -28,7 +28,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_courses",
-            "description": "Busca en el catalogo real de Eduplatform los cursos publicados mas relevantes para lo que la persona escribio.",
+            "description": "Busca en el catalogo real de EduTech los cursos publicados mas relevantes para lo que la persona escribio.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "Frase de busqueda en lenguaje natural"}},

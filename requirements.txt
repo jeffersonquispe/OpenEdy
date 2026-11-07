@@ -4,6 +4,7 @@ httpx
 openai
 python-dotenv
 livekit-agents
+livekit-api
 livekit-plugins-elevenlabs
 livekit-plugins-google
 livekit-plugins-silero

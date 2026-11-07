@@ -1,14 +1,22 @@
 import json
 import logging
 import os
+import uuid
+from datetime import timedelta
+from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from livekit import api as livekit_api
 from openai import APIError, AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 load_dotenv()  # antes de importar shared.tools, que lee PLATFORM_URL al importarse
 
+from api.config import load_settings, origin_of  # noqa: E402
+from api.rate_limit import FixedWindowLimiter  # noqa: E402
 from shared.system_prompt import SYSTEM_PROMPT  # noqa: E402
 from shared.tools import TOOL_IMPLEMENTATIONS, TOOLS  # noqa: E402
 
@@ -17,6 +25,15 @@ app = FastAPI()
 
 MAX_TURNS = 4
 MAX_MESSAGE_CHARS = 1000
+MAX_HISTORY_TURNS = 12
+MAX_HISTORY_TURN_CHARS = 2000
+VOICE_TOKEN_TTL = timedelta(minutes=10)
+WIDGET_DIR = Path(__file__).resolve().parent.parent / "widget"
+
+settings = load_settings()
+chat_limiter = FixedWindowLimiter(settings.chat_limit_per_minute, 60)
+voice_ip_limiter = FixedWindowLimiter(settings.voice_limit_per_ip, settings.voice_limit_window_seconds)
+voice_global_limiter = FixedWindowLimiter(settings.voice_limit_global_per_hour, 3600)
 
 # Proveedores en orden de preferencia: el primero con clave es el principal y los siguientes son
 # respaldo. Ambos exponen una API compatible con el SDK de OpenAI, asi que comparten el mismo loop.
@@ -43,12 +60,55 @@ PROVIDERS = [
 ]
 
 
+class HistoryTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    # Solo texto de persona y asistente: el cliente no puede inyectar turnos de sistema ni de tools.
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=MAX_HISTORY_TURN_CHARS)
+
+
 class ChatRequest(BaseModel):
     # FastAPI responde 422 con el detalle si el cuerpo no cumple: JSON invalido, sin message,
-    # message que no es texto, vacio, demasiado largo o con campos extra.
+    # message que no es texto, vacio, demasiado largo, historial invalido o con campos extra.
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
+    history: list[HistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
+
+
+def client_ip(request: Request) -> str:
+    # Detras de un proxy, uvicorn la resuelve con --proxy-headers y --forwarded-allow-ips.
+    return request.client.host if request.client else "desconocido"
+
+
+def widget_csp() -> str:
+    livekit_sources = []
+    origin = origin_of(settings.livekit_url.replace("wss://", "https://", 1).replace("ws://", "http://", 1))
+    if origin:
+        host = origin.split("://", 1)[1]
+        socket_scheme = "wss" if origin.startswith("https://") else "ws"
+        livekit_sources = [origin, f"{socket_scheme}://{host}"]
+    ancestors = " ".join(settings.embed_origins) or "'none'"
+    return "; ".join(
+        [
+            "default-src 'self'",
+            " ".join(["connect-src 'self'", *livekit_sources]),
+            "media-src 'self' blob:",
+            "img-src 'self' data:",
+            f"frame-ancestors {ancestors}",
+            "base-uri 'none'",
+            "form-action 'self'",
+        ]
+    )
+
+
+@app.middleware("http")
+async def widget_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/widget" or request.url.path.startswith("/widget/"):
+        response.headers["Content-Security-Policy"] = widget_csp()
+    return response
 
 
 def configured_providers() -> list[dict]:
@@ -89,10 +149,54 @@ async def complete(providers: list[dict], messages: list[dict]):
     raise HTTPException(status_code=502, detail=f"El modelo no respondio ({type(last_error).__name__})")
 
 
+@app.get("/config")
+async def config():
+    return {
+        "platformUrl": settings.platform_url,
+        "embedOrigins": list(settings.embed_origins),
+        "voiceEnabled": settings.voice_enabled,
+    }
+
+
+@app.post("/voice/token")
+async def voice_token(request: Request):
+    if not settings.voice_enabled:
+        raise HTTPException(status_code=503, detail="La voz no esta disponible")
+    # Primero el limite por IP: asi un solo cliente no agota el total por hora.
+    if not voice_ip_limiter.allow(client_ip(request)) or not voice_global_limiter.allow("total"):
+        raise HTTPException(status_code=429, detail="Demasiadas sesiones de voz")
+
+    room = f"edy-{uuid.uuid4()}"
+    token = (
+        livekit_api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity(f"visitante-{uuid.uuid4()}")
+        .with_ttl(VOICE_TOKEN_TTL)
+        .with_grants(
+            livekit_api.VideoGrants(
+                room_join=True,
+                room=room,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=False,
+                can_publish_sources=["microphone"],
+            )
+        )
+        .to_jwt()
+    )
+    return {"url": settings.livekit_url, "token": token}
+
+
 @app.post("/chat")
-async def chat(body: ChatRequest):
+async def chat(body: ChatRequest, request: Request):
+    if not chat_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="Demasiados mensajes")
+
     providers = configured_providers()
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": body.message}]
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *[{"role": turn.role, "content": turn.content} for turn in body.history],
+        {"role": "user", "content": body.message},
+    ]
 
     for _ in range(MAX_TURNS):
         response = await complete(providers, messages)
@@ -114,3 +218,7 @@ async def chat(body: ChatRequest):
             messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result, ensure_ascii=False)})
 
     return {"reply": "No pude completar la respuesta."}
+
+
+# Al final, para que el montaje no tape ninguna ruta. La ruta sale de este archivo, no del directorio de trabajo.
+app.mount("/widget", StaticFiles(directory=WIDGET_DIR, html=True), name="widget")

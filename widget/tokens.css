@@ -1,0 +1,35 @@
+/* Copia de los tokens de EduTech. Fuente: src/app/globals.css de la plataforma; mantener sincronizados. */
+:root {
+  color-scheme: dark;
+  --teal-500: #14939f;
+  --teal-600: #0e7c86;
+  --teal-700: #0b6b73;
+  --bg: #0a1b33;
+  --surface-card: #0f2a4a;
+  --surface-control: #0c2140;
+  --surface-hover: #163a63;
+  --fg-1: #f1f5f9;
+  --fg-2: #cbd5e1;
+  --fg-3: #94a3b8;
+  --border: #1e3a5f;
+  --border-strong: #4a76ad;
+  --action: var(--teal-600);
+  --action-hover: var(--teal-700);
+  --action-fg: #ffffff;
+  --accent: var(--teal-500);
+  --link: #7db4f0;
+  --success-bg: #0f3d2e;
+  --success-fg: #86efac;
+  --danger-bg: #4a1620;
+  --danger-fg: #fca5a5;
+  --danger-border: #8b2a3a;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+  --ring: 0 0 0 3px var(--teal-500);
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur: 150ms;
+  --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, Menlo, monospace;
+}
